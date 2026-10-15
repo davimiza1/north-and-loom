@@ -1,18 +1,20 @@
 import {useEffect,useMemo,useState} from 'react';
 import {Heart,Menu,Minus,Plus,Search,ShoppingBag,User,X,ArrowRight,Check} from 'lucide-react';
-import {products} from './data';
+import {products as seedProducts} from './data';
 import type {CartItem,Product} from './types';
+import {api} from './api';
+import Dashboard from './Dashboard';
 import './styles.css';
 
 const money=(value:number)=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(value);
 type Customer={id:string;name:string;email:string;role:string;wishlist:string[]};
-const apiBase=import.meta.env.VITE_API_URL||'/api';
-const api=async(path:string,options:RequestInit={})=>{const response=await fetch(`${apiBase}${path}`,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});const data=await response.json();if(!response.ok)throw new Error(data.message||'Something went wrong');return data};
+type Order={_id:string;total:number;status:string;createdAt:string;items:{name:string;quantity:number}[]};
 
 export default function App(){
   const [query,setQuery]=useState('');
   const [category,setCategory]=useState('All');
-  const [cart,setCart]=useState<CartItem[]>([]);
+  const [cart,setCart]=useState<CartItem[]>(()=>{try{return JSON.parse(localStorage.getItem('north-cart')||'[]')}catch{return []}});
+  const [catalog,setCatalog]=useState<Product[]>(seedProducts);
   const [wish,setWish]=useState<string[]>([]);
   const [selected,setSelected]=useState<Product|null>(null);
   const [cartOpen,setCartOpen]=useState(false);
@@ -25,17 +27,24 @@ export default function App(){
   const [user,setUser]=useState<Customer|null>(null);
   const [token,setToken]=useState(()=>localStorage.getItem('north-token')||'');
   const [orderId,setOrderId]=useState('');
+  const [orders,setOrders]=useState<Order[]>([]);
+  const [dashboard,setDashboard]=useState(false);
+  const [toast,setToast]=useState('');
+  const notify=(message:string)=>{setToast(message);window.setTimeout(()=>setToast(''),2800)};
+  useEffect(()=>{localStorage.setItem('north-cart',JSON.stringify(cart))},[cart]);
+  useEffect(()=>{api('/products').then((items:Product[])=>{if(items.length)setCatalog(items.map(p=>({...p,id:p.slug||p._id||p.id}))) }).catch(()=>{})},[dashboard]);
   useEffect(()=>{if(!token)return;api('/auth/me',{headers:{Authorization:`Bearer ${token}`}}).then(({user})=>{setUser(user);setWish(user.wishlist)}).catch(()=>{localStorage.removeItem('north-token');setToken('')})},[token]);
-  const categories=['All',...new Set(products.map(p=>p.category))];
-  const visible=useMemo(()=>products.filter(p=>(category==='All'||p.category===category)&&`${p.name} ${p.category}`.toLowerCase().includes(query.toLowerCase())),[category,query]);
+  useEffect(()=>{if(user)api('/orders/mine',{headers:{Authorization:`Bearer ${token}`}}).then(setOrders).catch(()=>{})},[user,token,ordered]);
+  const categories=['All',...new Set(catalog.map(p=>p.category))];
+  const visible=useMemo(()=>catalog.filter(p=>(category==='All'||p.category===category)&&`${p.name} ${p.category}`.toLowerCase().includes(query.toLowerCase())),[catalog,category,query]);
   const count=cart.reduce((n,i)=>n+i.quantity,0);
   const subtotal=cart.reduce((n,i)=>n+i.product.price*i.quantity,0);
-  const add=(product:Product)=>{setCart(current=>current.some(i=>i.product.id===product.id)?current.map(i=>i.product.id===product.id?{...i,quantity:i.quantity+1}:i):[...current,{product,quantity:1}]);setCartOpen(true)};
+  const add=(product:Product)=>{setCart(current=>current.some(i=>i.product.id===product.id)?current.map(i=>i.product.id===product.id?{...i,quantity:i.quantity+1}:i):[...current,{product,quantity:1}]);setCartOpen(true);notify(`${product.name} added to your bag`)};
   const adjust=(id:string,delta:number)=>setCart(current=>current.map(i=>i.product.id===id?{...i,quantity:i.quantity+delta}:i).filter(i=>i.quantity>0));
   const placeOrder=async(e:React.FormEvent<HTMLFormElement>)=>{e.preventDefault();if(!user){setCheckout(false);setAuthOpen(true);setAuthError('Sign in or create an account before placing your order.');return}const form=new FormData(e.currentTarget);try{const result=await api('/orders',{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({email:form.get('email'),customer:{firstName:form.get('firstName'),lastName:form.get('lastName'),address:form.get('address'),city:form.get('city'),postalCode:form.get('postalCode')},items:cart.map(i=>({productId:i.product.id,name:i.product.name,price:i.product.price,quantity:i.quantity})),total:subtotal})});setOrderId(result.id);setOrdered(true);setCart([])}catch(error){setAuthError(error instanceof Error?error.message:'Order failed')}};
   const submitAuth=async(e:React.FormEvent<HTMLFormElement>)=>{e.preventDefault();setAuthError('');const form=new FormData(e.currentTarget);try{const result=await api(`/auth/${authMode}`,{method:'POST',body:JSON.stringify({name:form.get('name'),email:form.get('email'),password:form.get('password')})});localStorage.setItem('north-token',result.token);setToken(result.token);setUser(result.user);setWish(result.user.wishlist);setAuthOpen(false)}catch(error){setAuthError(error instanceof Error?error.message:'Authentication failed')}};
   const toggleWish=async(id:string)=>{if(!user){setAuthOpen(true);setAuthError('Sign in to save pieces to your wishlist.');return}try{const result=await api(`/auth/wishlist/${id}`,{method:'PUT',headers:{Authorization:`Bearer ${token}`}});setWish(result.wishlist);setUser({...user,wishlist:result.wishlist})}catch(error){setAuthError(error instanceof Error?error.message:'Could not update wishlist')}};
-  const signOut=()=>{localStorage.removeItem('north-token');setToken('');setUser(null);setWish([])};
+  const signOut=()=>{localStorage.removeItem('north-token');setToken('');setUser(null);setWish([]);setAuthOpen(false);notify('Signed out')};
   const scrollTo=(id:string)=>{document.getElementById(id)?.scrollIntoView({behavior:'smooth'});setMenu(false)};
 
   return <>
@@ -47,7 +56,7 @@ export default function App(){
         <button onClick={()=>scrollTo('shop')}>Shop</button><button onClick={()=>scrollTo('collections')}>Collections</button><button onClick={()=>scrollTo('journal')}>Journal</button>
       </nav>
       <div className="header-actions">
-        <label className="search"><Search size={18}/><input aria-label="Search products" placeholder="Search" value={query} onChange={e=>{setQuery(e.target.value);scrollTo('shop')}}/></label>
+        <label className="search"><Search size={18}/><input name="catalog-search" aria-label="Search products" placeholder="Search" value={query} onChange={e=>{setQuery(e.target.value);scrollTo('shop')}}/></label>
         <button className="account desktop" aria-label="Account" onClick={()=>setAuthOpen(true)}><User/>{user&&<span>{user.name.split(' ')[0]}</span>}</button>
         <button className="icon bag" aria-label="Open cart" onClick={()=>setCartOpen(true)}><ShoppingBag/><b>{count}</b></button>
       </div>
@@ -79,6 +88,7 @@ export default function App(){
     {cartOpen&&<><div className="scrim" onClick={()=>setCartOpen(false)}/><aside className="drawer"><div className="drawer-head"><h2>Your bag <span>{count}</span></h2><button className="icon" onClick={()=>setCartOpen(false)}><X/></button></div>{cart.length?<><div className="cart-items">{cart.map(i=><div className="cart-item" key={i.product.id}><img src={i.product.image} alt=""/><div><span>{i.product.category}</span><h3>{i.product.name}</h3><b>{money(i.product.price)}</b><div className="quantity"><button onClick={()=>adjust(i.product.id,-1)}><Minus/></button><span>{i.quantity}</span><button onClick={()=>adjust(i.product.id,1)}><Plus/></button></div></div></div>)}</div><div className="cart-total"><p><span>Subtotal</span><b>{money(subtotal)}</b></p><small>Taxes and delivery calculated at checkout.</small><button className="primary wide" onClick={()=>{setCartOpen(false);setCheckout(true)}}>Continue to checkout <ArrowRight size={17}/></button></div></>:<div className="empty-cart"><ShoppingBag/><h3>Your bag is empty</h3><p>Discover pieces made to stay with you.</p><button className="primary" onClick={()=>{setCartOpen(false);scrollTo('shop')}}>Browse the collection</button></div>}</aside></>}
 
     {checkout&&<div className="overlay"><section className="modal checkout"><button className="close" onClick={()=>{setCheckout(false);setOrdered(false)}}><X/></button>{ordered?<div className="success"><span><Check/></span><p className="eyebrow">Order confirmed</p><h2>Thank you.</h2><p>Your test order <b>#{orderId.slice(-8).toUpperCase()}</b> is saved. No payment was charged.</p><button className="primary" onClick={()=>{setCheckout(false);setOrdered(false)}}>Continue shopping</button></div>:<><p className="eyebrow">Secure test checkout</p><h2>Delivery details</h2><form onSubmit={placeOrder}><label>Email<input name="email" required type="email" defaultValue={user?.email||''} placeholder="you@example.com"/></label><div className="two"><label>First name<input name="firstName" required/></label><label>Last name<input name="lastName" required/></label></div><label>Address<input name="address" required placeholder="Street and number"/></label><div className="two"><label>City<input name="city" required/></label><label>Postal code<input name="postalCode" required/></label></div><div className="order-line"><span>Total</span><b>{money(subtotal)}</b></div><button className="primary wide">Place test order</button><small>{user?'This portfolio checkout is in test mode. No card is required.':'You will be asked to sign in before placing the order.'}</small></form></>}</section></div>}
-    {authOpen&&<div className="overlay" onMouseDown={()=>setAuthOpen(false)}><section className="modal auth-modal" onMouseDown={e=>e.stopPropagation()}><button className="close" onClick={()=>setAuthOpen(false)}><X/></button>{user?<div className="account-panel"><p className="eyebrow">Your account</p><h2>Hello, {user.name.split(' ')[0]}.</h2><p>{user.email}</p><div className="account-stat"><span>Saved pieces</span><b>{wish.length}</b></div><p className="muted">Your wishlist and new orders are securely saved to your account.</p><button className="secondary wide" onClick={signOut}>Sign out</button></div>:<><p className="eyebrow">North & Loom members</p><h2>{authMode==='login'?'Welcome back.':'Create an account.'}</h2><form onSubmit={submitAuth}>{authMode==='register'&&<label>Name<input name="name" required placeholder="Your name"/></label>}<label>Email<input name="email" required type="email" placeholder="you@example.com"/></label><label>Password<input name="password" required type="password" minLength={8} placeholder="At least 8 characters"/></label>{authError&&<p className="form-error">{authError}</p>}<button className="primary wide">{authMode==='login'?'Sign in':'Create account'}</button></form><button className="auth-switch" onClick={()=>{setAuthMode(authMode==='login'?'register':'login');setAuthError('')}}>{authMode==='login'?'New here? Create an account':'Already a member? Sign in'}</button></>}</section></div>}
+    {authOpen&&<div className="overlay" onMouseDown={()=>setAuthOpen(false)}><section className="modal auth-modal" onMouseDown={e=>e.stopPropagation()}><button className="close" onClick={()=>setAuthOpen(false)}><X/></button>{user?<div className="account-panel"><p className="eyebrow">Your account</p><h2>Hello, {user.name.split(' ')[0]}.</h2><p>{user.email}</p><div className="account-stat"><span>Saved pieces</span><b>{wish.length}</b><span>Orders</span><b>{orders.length}</b></div><div className="account-orders"><b>Order history</b>{orders.length?orders.map(o=><div className="account-order" key={o._id}><span>#{o._id.slice(-6).toUpperCase()}<small>{new Date(o.createdAt).toLocaleDateString()}</small></span><span>${o.total.toFixed(2)}<small>{o.status}</small></span></div>):<p className="muted">Your completed orders will appear here.</p>}</div>{user.role==='admin'&&<button className="primary wide" onClick={()=>{setAuthOpen(false);setDashboard(true)}}>Open store dashboard</button>}<button className="secondary wide" onClick={signOut}>Sign out</button></div>:<><p className="eyebrow">North & Loom members</p><h2>{authMode==='login'?'Welcome back.':'Create an account.'}</h2><form onSubmit={submitAuth}>{authMode==='register'&&<label>Name<input name="name" required placeholder="Your name"/></label>}<label>Email<input name="email" required type="email" placeholder="you@example.com"/></label><label>Password<input name="password" required type="password" minLength={8} placeholder="At least 8 characters"/></label>{authError&&<p className="form-error">{authError}</p>}<button className="primary wide">{authMode==='login'?'Sign in':'Create account'}</button></form><button className="auth-switch" onClick={()=>{setAuthMode(authMode==='login'?'register':'login');setAuthError('')}}>{authMode==='login'?'New here? Create an account':'Already a member? Sign in'}</button></>}</section></div>}
+    {dashboard&&user?.role==='admin'&&<Dashboard token={token} user={user} onClose={()=>setDashboard(false)} notify={notify}/>} {toast&&<div className="toast">{toast}</div>}
   </>
 }
